@@ -38,8 +38,9 @@ type state struct {
 	// [1] http://csrc.nist.gov/publications/drafts/fips-202/fips_202_draft.pdf
 	//     "Draft FIPS 202: SHA-3 Standard: Permutation-Based Hash and
 	//      Extendable-Output Functions (May 2014)"
-	dsbyte  byte
-	storage [maxRate]byte
+	dsbyte byte
+
+	storage storageBuf
 
 	// Specific to SHA-3 and SHAKE.
 	outputLen int             // the default output size in bytes
@@ -60,15 +61,15 @@ func (d *state) Reset() {
 		d.a[i] = 0
 	}
 	d.state = spongeAbsorbing
-	d.buf = d.storage[:0]
+	d.buf = d.storage.asBytes()[:0]
 }
 
 func (d *state) clone() *state {
 	ret := *d
 	if ret.state == spongeAbsorbing {
-		ret.buf = ret.storage[:len(ret.buf)]
+		ret.buf = ret.storage.asBytes()[:len(ret.buf)]
 	} else {
-		ret.buf = ret.storage[d.rate-cap(d.buf) : d.rate]
+		ret.buf = ret.storage.asBytes()[d.rate-cap(d.buf) : d.rate]
 	}
 
 	return &ret
@@ -82,13 +83,13 @@ func (d *state) permute() {
 		// If we're absorbing, we need to xor the input into the state
 		// before applying the permutation.
 		xorIn(d, d.buf)
-		d.buf = d.storage[:0]
+		d.buf = d.storage.asBytes()[:0]
 		keccakF1600(&d.a)
 	case spongeSqueezing:
-		// If we're squeezing, we need to apply the permutatin before
+		// If we're squeezing, we need to apply the permutation before
 		// copying more output.
 		keccakF1600(&d.a)
-		d.buf = d.storage[:d.rate]
+		d.buf = d.storage.asBytes()[:d.rate]
 		copyOut(d, d.buf)
 	}
 }
@@ -97,7 +98,7 @@ func (d *state) permute() {
 // the multi-bitrate 10..1 padding rule, and permutes the state.
 func (d *state) padAndPermute(dsbyte byte) {
 	if d.buf == nil {
-		d.buf = d.storage[:0]
+		d.buf = d.storage.asBytes()[:0]
 	}
 	// Pad with this instance's domain-separator bits. We know that there's
 	// at least one byte of space in d.buf because, if it were full,
@@ -105,7 +106,7 @@ func (d *state) padAndPermute(dsbyte byte) {
 	// first one bit for the padding. See the comment in the state struct.
 	d.buf = append(d.buf, dsbyte)
 	zerosStart := len(d.buf)
-	d.buf = d.storage[:d.rate]
+	d.buf = d.storage.asBytes()[:d.rate]
 	for i := zerosStart; i < d.rate; i++ {
 		d.buf[i] = 0
 	}
@@ -116,18 +117,18 @@ func (d *state) padAndPermute(dsbyte byte) {
 	// Apply the permutation
 	d.permute()
 	d.state = spongeSqueezing
-	d.buf = d.storage[:d.rate]
+	d.buf = d.storage.asBytes()[:d.rate]
 	copyOut(d, d.buf)
 }
 
-// Write absorbs more data into the hash's state. It produces an error
-// if more data is written to the ShakeHash after writing
+// Write absorbs more data into the hash's state. It panics if any
+// output has already been read.
 func (d *state) Write(p []byte) (written int, err error) {
 	if d.state != spongeAbsorbing {
-		panic("sha3: write to sponge after read")
+		panic("sha3: Write after Read")
 	}
 	if d.buf == nil {
-		d.buf = d.storage[:0]
+		d.buf = d.storage.asBytes()[:0]
 	}
 	written = len(p)
 
@@ -181,12 +182,16 @@ func (d *state) Read(out []byte) (n int, err error) {
 }
 
 // Sum applies padding to the hash state and then squeezes out the desired
-// number of output bytes.
+// number of output bytes. It panics if any output has already been read.
 func (d *state) Sum(in []byte) []byte {
+	if d.state != spongeAbsorbing {
+		panic("sha3: Sum after Read")
+	}
+
 	// Make a copy of the original hash so that caller can keep writing
 	// and summing.
 	dup := d.clone()
-	hash := make([]byte, dup.outputLen)
+	hash := make([]byte, dup.outputLen, 64) // explicit cap to allow stack allocation
 	dup.Read(hash)
 	return append(in, hash...)
 }
